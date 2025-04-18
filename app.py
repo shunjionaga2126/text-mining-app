@@ -23,25 +23,33 @@ with st.expander("🔑 Claude APIキーを入力"):
         st.session_state.api_key = key
 
 # ─── CSVアップロード ────────────────────────────
-uploaded = st.file_uploader("📁 コールログCSVをアップロード（列: text, date）", type="csv")
+uploaded = st.file_uploader("📁 コールログCSVをアップロード", type="csv")
 if not uploaded:
     st.info("まずはCSVファイルをアップロードしてください")
     st.stop()
 
+# DataFrame読み込み
 df = pd.read_csv(uploaded)
-if "date" in df.columns:
-    df["date"] = pd.to_datetime(df["date"])
+
+# ─── 列選択 ────────────────────────────────────
+cols = df.columns.tolist()
+text_col = st.selectbox("▶ 本文が入っている列を選択してください", cols, index=cols.index("text") if "text" in cols else 0)
+date_col = None
+if "date" in cols:
+    date_col = "date"
+elif len(cols) > 1:
+    # 日付列があれば自動検出、なければ選択肢に追加
+    date_col = st.selectbox("▶ 日付が入っている列を選択（なければスキップ）", ["(なし)"] + cols)[1:]
+if date_col in cols:
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
 # ─── Claude連携関数 ────────────────────────────
 def analyze_with_claude(text: str, api_key: str) -> tuple[str,str]:
-    """
-    問い合わせ文に対して、カテゴリタグ(最大3つ)と感情を返す
-    """
     client = Anthropic(api_key=api_key)
     prompt = (
         f"{HUMAN_PROMPT}"
-        "以下の問い合わせ文について、関連するカテゴリタグを最大3つと、感情（ポジティブ／ネガティブ／中立）を"
-        "出力してください。\n\n"
+        "以下の問い合わせ文について、関連するカテゴリタグを最大3つと、"
+        "感情（ポジティブ／ネガティブ／中立）を出力してください。\n\n"
         f"{text}\n\n"
         "フォーマット：タグ1, タグ2, タグ3 | 感情: ラベル\n"
         f"{AI_PROMPT}"
@@ -53,7 +61,6 @@ def analyze_with_claude(text: str, api_key: str) -> tuple[str,str]:
         temperature=0.0,
     )
     result = resp.completion.strip()
-    # パース（|で分割）
     try:
         tags_part, sentiment_part = result.split("|")
         tags = [t.strip() for t in tags_part.split(",")][:3]
@@ -69,9 +76,9 @@ if st.button("🤖 タグ付け＆感情分析を実行"):
         st.error("先にAPIキーを入力してください")
         st.stop()
     with st.spinner("🛠️ Claudeで解析中…少々お待ちください"):
-        df["タグ"], df["感情"] = zip(
-            *df["text"].astype(str).apply(lambda x: analyze_with_claude(x, st.session_state.api_key))
-        )
+        df["タグ"], df["感情"] = zip(*df[text_col].astype(str).apply(
+            lambda x: analyze_with_claude(x, st.session_state.api_key)
+        ))
     st.success("完了しました！")
 
 # ─── 結果表示＆ダッシュボード ────────────────────
@@ -103,10 +110,11 @@ if "タグ" in df.columns:
     ax2.set_ylabel("")
     st.pyplot(fig2)
 
-    # 時系列トレンド（全件）
-    st.markdown("**時系列トレンド（全件）**")
-    ts = df.set_index("date").resample("W").size()
-    st.line_chart(ts)
+    # 時系列トレンド
+    if date_col in df.columns:
+        st.markdown("**時系列トレンド（全件）**")
+        ts = df.set_index(date_col).resample("W").size()
+        st.line_chart(ts)
 
     # CSVダウンロード
     csv = df.to_csv(index=False)
