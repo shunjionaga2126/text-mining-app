@@ -1,151 +1,92 @@
-import re
-import datetime
+# app.py
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from anthropic import Anthropic
+from collections import Counter
+from sudachipy import dictionary, tokenizer
+import json
 
-# ─── 定数 ─────────────────────────────────────────
-MODEL_NAME  = "claude-3-7-sonnet-20250219"
-BATCH_SIZE  = 20     # 一度に投げるコメント数
-CACHE_TTL   = 3600   # キャッシュ有効秒
+# ─── サイドバー設定 ─────────────────────────
+st.sidebar.title("🔧 設定")
+uploaded = st.sidebar.file_uploader("📁 コールログCSVアップロード", type="csv")
 
-# ─── ページ設定 ───────────────────────────────────
-st.set_page_config(page_title="TagSense", layout="wide")
-st.title("🗂️ TagSense — メインタグ＆サブタグ 自動生成ダッシュボード")
+# 辞書＆除外ワード永続化ファイル
+DICT_FILE = "keywords.json"
+try:
+    with open(DICT_FILE, "r", encoding="utf-8") as f:
+        dic = json.load(f)
+except FileNotFoundError:
+    dic = {"include": [], "exclude": []}
 
-# ─── サイドバー ───────────────────────────────────
-with st.sidebar:
-    api_key = st.text_input("🔑 Claude APIキー", type="password")
-    st.markdown("---")
-    st.write("バッチ設定")
-    bsize = st.slider("一度に投げるコメント数", 5, 50, BATCH_SIZE, 5)
-    st.write("キャッシュTTL (秒)")
-    ttl = st.number_input("", 300, 86400, CACHE_TTL, 300)
-if not api_key:
-    st.sidebar.error("APIキーを入力してください")
+# 辞書登録
+new_inc = st.sidebar.text_input("⭐️ 辞書に追加")
+if st.sidebar.button("辞書登録"):
+    if new_inc and new_inc not in dic["include"]:
+        dic["include"].append(new_inc)
+        with open(DICT_FILE, "w", encoding="utf-8") as f:
+            json.dump(dic, f, ensure_ascii=False, indent=2)
+# 除外ワード登録
+new_exc = st.sidebar.text_input("🚫 除外ワード追加")
+if st.sidebar.button("除外登録"):
+    if new_exc and new_exc not in dic["exclude"]:
+        dic["exclude"].append(new_exc)
+        with open(DICT_FILE, "w", encoding="utf-8") as f:
+            json.dump(dic, f, ensure_ascii=False, indent=2)
 
-# ─── CSVアップロード ─────────────────────────────────
-uploaded = st.file_uploader(
-    "📁 コメントCSVをアップロード（必須列: コメント, 作成日）", type="csv"
-)
+# ─── メイン画面 ───────────────────────────────
+st.title("🔍 BPO向けテキストマイニングデモ")
+
 if not uploaded:
-    st.info("CSVをアップロードして下さい")
+    st.info("まずはサイドバーでCSVをアップしてください")
     st.stop()
 
-# ─── データ読み込み＆検証 ───────────────────────────
+# CSV読み込み＋バリデーション
 df = pd.read_csv(uploaded)
 if "コメント" not in df.columns or "作成日" not in df.columns:
     st.error("CSVに「コメント」「作成日」列が必要です")
     st.stop()
 df["作成日"] = pd.to_datetime(df["作成日"], errors="coerce")
+df = df.dropna(subset=["コメント","作成日"]).drop_duplicates(subset=["コメント","作成日"])
 
-# ─── LLM呼び出し（バッチ） ─────────────────────────
-@st.cache_data(ttl=ttl)
-def fetch_tags(snippets: tuple[str], key: str) -> list[tuple[str,str]]:
-    # プロンプト作成
-    prompt = "以下のコメントについて、番号付きで【メインタグ】と【サブタグ（最大2つ）】を出力してください。\n\n"
-    for i, s in enumerate(snippets, 1):
-        prompt += f"{i}. {s[:200].replace(chr(10),' ')}\n"
-    prompt += "\n出力フォーマット:\n1. メインタグ: <タグ> | サブタグ: <タグ1>, <タグ2>\n…\n"
+# 集計期間フィルタ
+st.subheader("📅 集計期間フィルタ")
+dmin, dmax = st.date_input("期間を選択", [df["作成日"].min(), df["作成日"].max()])
+mask = (df["作成日"] >= pd.to_datetime(dmin)) & (df["作成日"] <= pd.to_datetime(dmax))
+df = df[mask]
 
-    client = Anthropic(api_key=key)
-    try:
-        resp = client.messages.create(
-            model=MODEL_NAME,
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=300,
-            temperature=0.0,
-        )
-    except Exception:
-        return [("", "") for _ in snippets]
+# 形態素解析＆頻出キーワード抽出
+st.subheader("📊 頻出キーワードランキング")
+tokenizer_obj = dictionary.Dictionary().create()
+STOP = set(["は","の","が","を","に","で","と","も","た","です","ます"])
+ctr = Counter()
+for text in df["コメント"]:
+    for m in tokenizer_obj.tokenize(str(text), tokenizer.Tokenizer.SplitMode.C):
+        w = m.surface()
+        if len(w) > 1 and w not in STOP:
+            ctr[w] += 1
+kw = ctr.most_common(30)
+# 辞書優先＆除外フィルタ
+kw = [(w,c) for w,c in kw if w not in dic["exclude"]]
+for w in dic["include"]:
+    if w in dict(kw):
+        kw.insert(0,(w,dict(kw)[w]))
+words, counts = zip(*kw) if kw else ([],[])
+fig, ax = plt.subplots(figsize=(8,4))
+ax.barh(words, counts)
+ax.invert_yaxis()
+ax.set_xlabel("出現回数")
+st.pyplot(fig, use_container_width=True)
 
-    raw = resp.content
-    if isinstance(raw, list):
-        raw = raw[0]
-    text = raw.strip() if hasattr(raw, "strip") else str(raw)
+# キーワード選択→該当全文 or DL
+st.subheader("🔍 キーワードで全文表示 / CSVダウンロード")
+sel = st.selectbox("キーワードを選択", words)
+if sel:
+    subdf = df[df["コメント"].str.contains(sel, na=False)]
+    st.write(subdf)
+    csv_data = subdf.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 フィルタ結果DL", csv_data, f"{sel}_results.csv")
 
-    # 「1.」「2.」…で分割
-    parts = re.split(r"\d+\.\s", text)
-    # 最初の空要素を除き、必要分だけ使う
-    entries = [p.strip() for p in parts if p.strip()][: len(snippets)]
-
-    results = []
-    for entry in entries:
-        # entry例: "メインタグ: 決済 | サブタグ: クレジット, 店頭受取"
-        try:
-            main_part, sub_part = entry.split("|", 1)
-            main = main_part.split(":",1)[1].strip()
-            subs = [t.strip() for t in sub_part.split(":",1)[1].split(",")][:2]
-            sub = ", ".join(subs)
-        except Exception:
-            main, sub = "", ""
-        results.append((main, sub))
-    # 足りない分は空で埋める
-    results += [("", "")] * (len(snippets) - len(results))
-    return results
-
-# ─── 全コメント解析 ─────────────────────────────────
-def generate_tags(comments: list[str], key: str, batch_size: int):
-    mains, subs = [], []
-    for i in range(0, len(comments), batch_size):
-        batch = tuple(comments[i:i+batch_size])
-        pairs = fetch_tags(batch, key)
-        for m, s in pairs:
-            mains.append(m)
-            subs.append(s)
-    return pd.DataFrame({"メインタグ": mains, "サブタグ": subs})
-
-# ─── タグ付け実行 ─────────────────────────────────
-if st.button("🤖 タグ付けを実行"):
-    if not api_key:
-        st.error("APIキーが必要です")
-        st.stop()
-    comments = df["コメント"].astype(str).tolist()
-    with st.spinner("タグを生成中…お待ちください"):
-        tag_df = generate_tags(comments, api_key, bsize)
-        df[["メインタグ","サブタグ"]] = tag_df
-    st.success("✅ タグ付け完了！")
-
-# ─── ダッシュボード＆CSVダウンロード ────────────────────
-if "メインタグ" in df.columns:
-    # KPI
-    total       = len(df)
-    main_counts = df["メインタグ"].value_counts()
-    k1,k2,k3    = st.columns(3)
-    k1.metric("コメント件数", total)
-    k2.metric("ユニークメインタグ", main_counts.size)
-    k3.metric("トップタグ件数", int(main_counts.iloc[0]) if not main_counts.empty else 0)
-
-    st.markdown("---")
-    # メインタグ分布
-    st.subheader("メインタグ 分布")
-    fig1, ax1 = plt.subplots(figsize=(6,4))
-    main_counts.plot.bar(ax=ax1); ax1.set_ylabel("件数")
-    st.pyplot(fig1, use_container_width=True)
-
-    # 週次トレンド
-    st.subheader("週次トレンド（メインタグ）")
-    trend = (
-        df.set_index("作成日")["メインタグ"]
-          .groupby(pd.Grouper(freq="W"))
-          .value_counts()
-          .unstack(fill_value=0)
-    )
-    st.line_chart(trend, use_container_width=True)
-
-    # 新規タグ検出
-    first = df["作成日"].min()
-    baseline = set(df[df["作成日"] <= first + datetime.timedelta(days=6)]["メインタグ"])
-    new_tags = sorted(set(df["メインタグ"]) - baseline)
-    if new_tags:
-        st.subheader("過去未出メインタグ")
-        for tag in new_tags:
-            st.write(f"- {tag}")
-
-    st.markdown("---")
-    # CSVダウンロード
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 タグ付きCSVダウンロード", csv, "tagged_results.csv", mime="text/csv")
-else:
-    st.info("「タグ付けを実行」後にダッシュボードが表示されます")
+# 辞書・除外ワード一覧
+st.sidebar.markdown("---")
+st.sidebar.write("Current 辞書ワード:", dic["include"])
+st.sidebar.write("Current 除外ワード:", dic["exclude"])
