@@ -34,10 +34,8 @@ df["作成日"] = pd.to_datetime(df["作成日"], errors="coerce")
 
 # ─── Claude Messages API 呼び出し関数 ─────────────────
 def analyze_with_claude(comment: str, api_key: str):
-    snippet = comment[:500]  # 長いコメントは先頭500文字に制限
+    snippet = comment[:500]  # 長いコメントは先頭500文字まで
     client = Anthropic(api_key=api_key)
-    # Messages APIでは messages に HUMAN_PROMPT/AI_PROMPT を含めず、
-    # user-role のみ指定します
     user_message = (
         f"{HUMAN_PROMPT}"
         "以下のコメント文について、関連するカテゴリタグを最大3つと、"
@@ -49,15 +47,14 @@ def analyze_with_claude(comment: str, api_key: str):
         resp = client.messages.create(
             model="claude-3-7-sonnet-20250219",
             messages=[{"role": "user", "content": user_message}],
-            max_tokens_to_sample=100,
+            max_tokens=200,       # ← 必須パラメータに修正
             temperature=0.0,
-            thinking={"type": "enabled", "budget_tokens": 1600},
         )
         result = resp.content.strip()
     except Exception as e:
         st.error(f"APIエラー: {e}")
         return "", ""
-    # 「|」でタグと感情に分割
+    # 結果をパース
     try:
         tags_part, sent_part = result.split("|")
         tags = [t.strip() for t in tags_part.split(",")][:3]
@@ -71,7 +68,7 @@ if st.button("🤖 タグ付け＆感情分析を実行"):
     if not api_key:
         st.error("先にAPIキーを入力してください")
         st.stop()
-    with st.spinner("🛠️ 解析中…しばらくお待ちください"):
+    with st.spinner("🛠️ 解析中…少々お待ちください"):
         df["タグ"], df["感情"] = zip(*[
             analyze_with_claude(c, api_key)
             for c in df["コメント"].astype(str)
