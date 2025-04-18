@@ -1,43 +1,51 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
+from anthropic import Anthropic
 
 # ─── ページ設定 ─────────────────────────────────
 st.set_page_config(page_title="TagSense", layout="wide")
 st.title("🗂️ TagSense — コメントベース タグ付け＆感情分析")
 
-# ─── サイドバー：APIキー入力 ─────────────────────
-api_key = st.sidebar.text_input(
-    "🔑 Claude APIキーを入力",
-    type="password",
-    help="Anthropicコンソールで取得したAPIキーを貼り付けてください"
-)
+# ─── サイドバー：設定 ─────────────────────────────
+with st.sidebar:
+    api_key = st.text_input(
+        "🔑 Claude APIキー",
+        type="password",
+        help="Anthropicコンソールで取得したAPIキーを貼り付けてください"
+    )
+    max_rows = st.number_input(
+        "🔢 一度に解析する最大行数",
+        min_value=10, max_value=1000, value=200, step=10,
+        help="大きいCSVはここで制限するとAPIエラー防止になります"
+    )
 
 # ─── CSVアップロード ────────────────────────────
 uploaded = st.file_uploader(
-    "📁 CSVをアップロード（必須列: チケットID, コメントID, コメント, 作成日）",
-    type="csv"
+    "📁 コメントCSVアップロード（必須列: コメント, 作成日）", type="csv"
 )
 if not uploaded:
-    st.info("まずはCSVファイルをアップロードしてください")
+    st.info("CSVをアップロードしてください")
     st.stop()
 
-# ─── データ読み込み＆日付変換 ────────────────────
+# ─── データ読み込み＆バリデーション ────────────────────
 df = pd.read_csv(uploaded)
-required = ["チケットID", "コメントID", "コメント", "作成日"]
-for col in required:
-    if col not in df.columns:
-        st.error(f"CSVに必須列「{col}」がありません。列名を確認してください。")
-        st.stop()
+if "コメント" not in df.columns or "作成日" not in df.columns:
+    st.error("CSVに必須列「コメント」「作成日」がありません")
+    st.stop()
 df["作成日"] = pd.to_datetime(df["作成日"], errors="coerce")
 
-# ─── Claude Messages API 呼び出し関数 ─────────────────
-def analyze_with_claude(comment: str, api_key: str):
-    snippet = comment[:500]  # 長いコメントは先頭500文字まで
-    client = Anthropic(api_key=api_key)
+# 行数制限
+if len(df) > max_rows:
+    st.warning(f"解析対象を先頭{max_rows}行に制限します（全{len(df)}行中）")
+    df = df.head(max_rows)
+
+# ─── API解析関数（キャッシュ付き） ────────────────────
+@st.cache_data(show_spinner=False)
+def analyze_comment(comment: str, key: str):
+    snippet = comment[:500]  # 最大500文字
+    client = Anthropic(api_key=key)
     user_message = (
-        f"{HUMAN_PROMPT}"
         "以下のコメント文について、関連するカテゴリタグを最大3つと、"
         "感情（ポジティブ／ネガティブ／中立）を出力してください。\n\n"
         f"{snippet}\n\n"
@@ -47,42 +55,42 @@ def analyze_with_claude(comment: str, api_key: str):
         resp = client.messages.create(
             model="claude-3-7-sonnet-20250219",
             messages=[{"role": "user", "content": user_message}],
-            max_tokens=200,       # ← 必須パラメータに修正
+            max_tokens=200,
             temperature=0.0,
         )
-        result = resp.content.strip()
+        raw = resp.content
+        if isinstance(raw, list):
+            raw = raw[0]
+        text = raw.strip() if hasattr(raw, "strip") else str(raw)
     except Exception as e:
-        st.error(f"APIエラー: {e}")
+        # APIエラー時は空返却
         return "", ""
-    # 結果をパース
-    try:
-        tags_part, sent_part = result.split("|")
-        tags = [t.strip() for t in tags_part.split(",")][:3]
-        sentiment = sent_part.replace("感情:", "").strip()
-    except Exception:
-        tags, sentiment = [result], ""
+    # パース
+    parts = text.split("|", 1)
+    if len(parts) == 2:
+        tags = [t.strip() for t in parts[0].split(",")][:3]
+        sentiment = parts[1].replace("感情:", "").strip()
+    else:
+        tags, sentiment = [text], ""
     return ", ".join(tags), sentiment
 
-# ─── タグ付け＆感情分析 実行 ────────────────────
+# ─── 解析実行 ────────────────────────────────────
 if st.button("🤖 タグ付け＆感情分析を実行"):
     if not api_key:
-        st.error("先にAPIキーを入力してください")
+        st.error("APIキーを入力してください")
         st.stop()
-    with st.spinner("🛠️ 解析中…少々お待ちください"):
-        df["タグ"], df["感情"] = zip(*[
-            analyze_with_claude(c, api_key)
-            for c in df["コメント"].astype(str)
-        ])
-    st.success("✅ 完了しました！")
+    with st.spinner("解析中…少々お待ちください"):
+        results = [analyze_comment(c, api_key) for c in df["コメント"].astype(str)]
+        df["タグ"], df["感情"] = zip(*results)
+    st.success("完了しました！")
 
 # ─── 結果表示＆ダッシュボード ────────────────────
 if "タグ" in df.columns:
-    st.subheader("📋 タグ＆感情付き結果一覧")
-    st.dataframe(df[["チケットID", "コメントID", "コメント", "タグ", "感情", "作成日"]])
+    st.subheader("📋 結果一覧")
+    st.dataframe(df)
 
     st.subheader("📊 ダッシュボード")
-
-    # ■ カテゴリ別 件数ランキング
+    # タグ件数
     tag_counts = (
         df["タグ"].str.split(",", expand=True)
         .stack().str.strip().value_counts()
@@ -92,24 +100,22 @@ if "タグ" in df.columns:
     ax1.set_ylabel("件数")
     st.pyplot(fig1)
 
-    # ■ 感情分布
+    # 感情分布
     sent_counts = df["感情"].fillna("未分類").value_counts()
     fig2, ax2 = plt.subplots()
     sent_counts.plot.pie(autopct="%1.1f%%", ax=ax2)
     ax2.set_ylabel("")
     st.pyplot(fig2)
 
-    # ■ 時系列トレンド（週次集計）
+    # 時系列
+    st.markdown("**時系列トレンド（週次）**")
     ts = df.set_index("作成日").resample("W").size()
     st.line_chart(ts)
 
-    # ■ CSVダウンロード
+    # DLボタン
     csv_data = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "📥 分析結果をCSVダウンロード",
-        csv_data,
-        "tagged_results.csv",
-        mime="text/csv"
+        "📥 CSVダウンロード", csv_data, "tagged_results.csv", mime="text/csv"
     )
 else:
-    st.info("「🤖 タグ付け＆感情分析を実行」ボタンを押してください")
+    st.info("「タグ付け＆感情分析を実行」ボタンを押してください")
