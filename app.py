@@ -59,7 +59,6 @@ def analyze_with_claude(text: str, api_key: str) -> tuple[str,str]:
         tags = [t.strip() for t in tags_part.split(",")][:3]
         sentiment = sentiment_part.replace("感情:", "").strip()
     except Exception:
-        # フォーマットが違う場合は丸ごとtags列に入れておく
         tags = [result]
         sentiment = ""
     return ", ".join(tags), sentiment
@@ -75,41 +74,42 @@ if st.button("🤖 タグ付け＆感情分析を実行"):
         )
     st.success("完了しました！")
 
-# ─── 結果テーブル ─────────────────────────────
-st.subheader("📋 タグ付き結果一覧")
-st.dataframe(df)
+# ─── 結果表示＆ダッシュボード ────────────────────
+if "タグ" in df.columns:
+    st.subheader("📋 タグ付き結果一覧")
+    st.dataframe(df)
 
-# ─── ダッシュボード ────────────────────────────
-st.subheader("📊 ダッシュボード")
+    st.subheader("📊 ダッシュボード")
 
-# カテゴリ件数ランキング
-tag_counts = (
-    df["タグ"]
-    .str.split(",", expand=True)
-    .stack()
-    .str.strip()
-    .value_counts()
-)
-st.markdown("**カテゴリ別 件数ランキング**")
-fig1, ax1 = plt.subplots()
-tag_counts.plot.bar(ax=ax1)
-ax1.set_xlabel("")
-ax1.set_ylabel("件数")
-st.pyplot(fig1)
+    # カテゴリ件数ランキング
+    tag_counts = (
+        df["タグ"]
+        .str.split(",", expand=True)
+        .stack()
+        .str.strip()
+        .value_counts()
+    )
+    st.markdown("**カテゴリ別 件数ランキング**")
+    fig1, ax1 = plt.subplots()
+    tag_counts.plot.bar(ax=ax1)
+    ax1.set_ylabel("件数")
+    st.pyplot(fig1)
 
-# 感情分布
-sent_counts = df["感情"].value_counts()
-st.markdown("**感情分布**")
-fig2, ax2 = plt.subplots()
-sent_counts.plot.pie(autopct="%1.1f%%", ax=ax2)
-ax2.set_ylabel("")
-st.pyplot(fig2)
+    # 感情分布
+    sent_counts = df["感情"].value_counts()
+    st.markdown("**感情分布**")
+    fig2, ax2 = plt.subplots()
+    sent_counts.plot.pie(autopct="%1.1f%%", ax=ax2)
+    ax2.set_ylabel("")
+    st.pyplot(fig2)
 
-# 時系列トレンド（全タグ合計件数）
-st.markdown("**時系列トレンド（全件）**")
-ts = df.set_index("date").resample("W").size()
-st.line_chart(ts)
+    # 時系列トレンド（全件）
+    st.markdown("**時系列トレンド（全件）**")
+    ts = df.set_index("date").resample("W").size()
+    st.line_chart(ts)
 
-# ─── CSVダウンロード ───────────────────────────
-csv = df.to_csv(index=False)
-st.download_button("📥 分析結果をCSVダウンロード", csv, "tagged_results.csv")
+    # CSVダウンロード
+    csv = df.to_csv(index=False)
+    st.download_button("📥 分析結果をCSVダウンロード", csv, "tagged_results.csv")
+else:
+    st.info("“🤖 タグ付け＆感情分析を実行” ボタンを押してください")
